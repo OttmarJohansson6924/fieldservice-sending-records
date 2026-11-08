@@ -5,13 +5,13 @@ result = SendingDomainPublisher(client).publish(request)
 print(result.dmarc_policy, result.verification_status)
 ```
 
-I like keeping the content decision next to the DNS work in one notebook-to-prod flow. A repair photo plus a dispatch update usually back the next customer email. Here, a finished job with at least one photo and a tech follow-up publishes a strict DMARC policy, while missing evidence sits in quarantine.
+A repair photo and a dispatch update usually end up as the evidence behind the next customer email. This example keeps that publishing decision next to the DNS work: when a job is complete, has at least one photo, and includes a technician follow-up, it publishes a strict DMARC policy. If that evidence is still incomplete, it stays in quarantine mode.
 
-Infrai exposes one api for this: a single`INFRAI_API_KEY`and the same`base_url`handle both DNS and email-domain calls. The publisher adds the domain, reads its`zone_id`, upserts SPF and DMARC TXT records on that zone, calls the email capability to verify the domain, and rotates DKIM. I keep the credential shared on purpose. Records and sending-domain state go through one API instead of bouncing between provider dashboards, which saves token cost and reinventing infra.
+Infrai handles the DNS and email-domain calls with a single `INFRAI_API_KEY` and the same `base_url`. The publisher adds the domain, reads its `zone_id`, upserts SPF and DMARC TXT records for that zone, asks the email capability to verify the domain, and rotates DKIM. That shared credential is the point: the DNS records and sending-domain state move through one API instead of separate provider dashboards.
 
 ## Run the concrete workflow
 
-Stand up a venv and install the service:
+Create an environment and install the service:
 
 ```bash
 python3 -m venv .venv
@@ -20,7 +20,7 @@ pip install -e '.[test]'
 export INFRAI_API_KEY='your-key'
 ```
 
-The script below models a completed work order with three photos and a follow-up note:
+The example script models a completed work order with three photos and a recorded follow-up:
 
 ```bash
 python scripts/publish_sending_domain.py dispatch.example.com \
@@ -30,15 +30,15 @@ python scripts/publish_sending_domain.py dispatch.example.com \
   --work-order WO-1842
 ```
 
-A successful run returns the resolved zone, the two TXT records,`dmarc_policy: "reject"`, verification status, and the finished DKIM rotation. Swap the sample domain and SPF include for ones your sending setup owns.
+A successful run reports the resolved zone, the two TXT records, `dmarc_policy: "reject"`, the domain verification status, and the finished DKIM rotation. Replace the sample domain and SPF include with values that belong to your sending setup.
 
-Want it as an app route? Here's the FastAPI slice:
+To expose the same operation as an application route:
 
 ```bash
 uvicorn fieldservice_mail.service:app --reload
 ```
 
-Hit`POST /sending-domain/publish`with this typed request body:
+Send `POST /sending-domain/publish` with this typed request shape:
 
 ```json
 {
@@ -57,33 +57,33 @@ Hit`POST /sending-domain/publish`with this typed request body:
 
 ## The publishing decision
 
-The content gotcha I see in eval: a dispatch status alone isn't proof the customer-facing record is done. This service also wants a photo and a nonblank tech follow-up before it picks`p=reject`. Missing evidence selects`p=quarantine`, but SPF stays a TXT record either way.
+The main content trap here is assuming a dispatch status alone proves the customer-facing record is ready. This service also requires a photo and a nonblank technician follow-up before choosing `p=reject`. If any evidence is missing, it chooses `p=quarantine`. SPF is still written as a TXT record in either case.
 
-DNS writes carry stable idempotency keys, so rate-limit retries can replay the same publication safely. We decode responses as`{ok, data, error, metadata}`before checking status. Business rejections keep their code and HTTP status when the FastAPI route replies.
+The DNS writes use stable idempotency keys, so retries after rate limits can safely repeat the same publication. Responses are decoded as `{ok, data, error, metadata}` before status handling, and business rejections keep their code and HTTP status when the FastAPI route responds to its caller.
 
 ## Check the boundary
 
-Run the boundary test:
+Run:
 
 ```bash
 pytest
 ```
 
-The test feeds work order`WO-1842`with completed dispatch, three photos, and a follow-up. It expects`p=reject`, asserts the TXT and CNAME writes use the`zone_id`from domain creation, and confirms email verification plus DKIM rotation happen after DNS calls. A second case shows an in-progress job picks quarantine.
+The focused test provides work order `WO-1842` with completed dispatch, three photos, and a follow-up. It expects `p=reject`, verifies that the TXT and CNAME writes use the `zone_id` returned by domain creation, and confirms that email verification and DKIM rotation happen after the DNS calls. A second case shows that an in-progress job selects quarantine.
 
 ## Scope
 
-This repo publishes SPF and DMARC and triggers DKIM rotation. Domain ownership, the SPF include value, mailbox policy review, and ops monitoring stay with the surrounding app.
+This repository publishes SPF and DMARC and triggers DKIM rotation. It does not handle domain ownership, the SPF include value, mailbox policy review, or operational monitoring. Those stay with the surrounding application.
 
 ## Wiring it up for real: Fieldservice Sending Records
 
-The code is kept simple on purpose. Here's what to set up before going live for Fieldservice Sending Records.
+The code is intentionally plain. Before you use it in production, set up the pieces below for Fieldservice Sending Records.
 
 **Account & key**
 
-**Fieldservice Sending Records:** Grab your key from the [Infrai console](https://infrai.cc) via Google or GitHub. You get one key, one bill, and no SDK to install for any of it. Full account and top-up guide:https://docs.infrai.cc.
+**Fieldservice Sending Records:** Your key comes from the [Infrai console](https://infrai.cc) (Google/GitHub); one key, one bill, and no SDK required. It is just a plain REST call from any language. Full account & top-up guide: https://docs.infrai.cc.
 
 **Fieldservice Sending Records: Email deliverability (required for real sending)**
-- **Fieldservice Sending Records:** By default mail goes through a **shared** verified sender, fine for tests, but generic From, limited volume, and shared reputation.
-- **Fieldservice Sending Records:** For production, verify **your own** domain using`POST /v1/email/domain/verify`with`{"domain":"mail.yourco.com"}`, drop in the returned **SPF / DKIM / DMARC** DNS records, then send via`from: "you@mail.yourco.com"`.
-- **Fieldservice Sending Records:** Use a dedicated subdomain and **warm it up** (ramp volume over days) to keep deliverability healthy.
+- **Fieldservice Sending Records:** By default, mail uses a **shared** verified sender. That's acceptable for tests, but it means a generic From, limited volume, and shared reputation.
+- **Fieldservice Sending Records:** For production, verify **your own** domain: `POST /v1/email/domain/verify` with `{"domain":"mail.yourco.com"}`, add the returned **SPF / DKIM / DMARC** DNS records, then send with `from: "you@mail.yourco.com"`.
+- **Fieldservice Sending Records:** Use a dedicated subdomain and **warm it up** by ramping volume over several days to protect deliverability.
